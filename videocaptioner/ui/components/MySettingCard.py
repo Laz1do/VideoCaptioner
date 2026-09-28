@@ -4,7 +4,10 @@ from typing import List, Optional, Union
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QVBoxLayout
-from qfluentwidgets import ColorDialog, ComboBox, CompactDoubleSpinBox, CompactSpinBox
+from qfluentwidgets import (
+    ColorDialog, ComboBox, CompactDoubleSpinBox, CompactSpinBox,
+    FluentIcon as FIF, ListWidget, MessageBoxBase, SearchLineEdit, ToolButton,
+)
 from qfluentwidgets.common.config import isDarkTheme
 from qfluentwidgets.common.icon import FluentIconBase, drawIcon
 from qfluentwidgets.common.style_sheet import FluentStyleSheet
@@ -246,6 +249,85 @@ class ComboBoxSettingCard(SettingCard):
     def clear(self):
         """清空所有选项"""
         self.comboBox.clear()
+
+
+class FontSearchDialog(MessageBoxBase):
+    """Search every font family reported by the operating system."""
+
+    def __init__(self, fonts: List[str], current_font: str, parent=None):
+        super().__init__(parent)
+        self.selected_font = current_font
+        self.fonts = fonts
+        self.searchEdit = SearchLineEdit(self)
+        self.searchEdit.setPlaceholderText(self.tr("搜索已安装字体"))
+        self.fontList = ListWidget(self)
+        self.fontList.setMinimumHeight(320)
+        self.errorLabel = QLabel("", self)
+        self.viewLayout.addWidget(self.searchEdit)
+        self.viewLayout.addWidget(self.fontList)
+        self.viewLayout.addWidget(self.errorLabel)
+        self.widget.setMinimumWidth(400)
+        self.yesButton.setText(self.tr("使用字体"))
+        self.cancelButton.setText(self.tr("取消"))
+        self.searchEdit.textChanged.connect(self.filterFonts)
+        self.fontList.itemDoubleClicked.connect(self._chooseFont)
+        self.filterFonts("")
+        matches = self.fontList.findItems(current_font, Qt.MatchExactly)
+        if matches:
+            self.fontList.setCurrentItem(matches[0])
+
+    def filterFonts(self, query: str) -> None:
+        current = self.fontList.currentItem()
+        current_name = current.text() if current else self.selected_font
+        self.fontList.clear()
+        self.fontList.addItems([name for name in self.fonts if query.casefold() in name.casefold()])
+        matches = self.fontList.findItems(current_name, Qt.MatchExactly)
+        if matches:
+            self.fontList.setCurrentItem(matches[0])
+        self.errorLabel.clear()
+
+    def _chooseFont(self, item) -> None:
+        self.fontList.setCurrentItem(item)
+        if self.validate():
+            self.accept()
+
+    def validate(self) -> bool:
+        item = self.fontList.currentItem()
+        if item is None:
+            self.errorLabel.setText(self.tr("请选择一个字体"))
+            return False
+        self.selected_font = item.text()
+        return True
+
+
+class SearchableFontSettingCard(ComboBoxSettingCard):
+    """Small frequent-font menu with a searchable system-font picker."""
+
+    def __init__(self, icon, title, content=None, parent=None):
+        super().__init__(icon, title, content, parent=parent)
+        self.availableFonts: List[str] = []
+        self.searchButton = ToolButton(FIF.SEARCH, self)
+        self.searchButton.setToolTip(self.tr("搜索全部已安装字体"))
+        self.searchButton.setAccessibleName(self.tr("搜索全部已安装字体"))
+        self.hBoxLayout.addWidget(self.searchButton)
+        self.hBoxLayout.addSpacing(8)
+        self.searchButton.clicked.connect(self._searchFonts)
+
+    def setAvailableFonts(self, all_fonts: List[str], common_fonts: List[str]) -> None:
+        self.availableFonts = all_fonts
+        self.clear()
+        self.addItems(common_fonts)
+
+    def setCurrentText(self, text: str) -> None:
+        # Keep fonts from imported styles visible even when they are not common.
+        if text and self.comboBox.findText(text) < 0:
+            self.addItem(text)
+        super().setCurrentText(text)
+
+    def _searchFonts(self) -> None:
+        dialog = FontSearchDialog(self.availableFonts, self.comboBox.currentText(), self.window())
+        if dialog.exec_():
+            self.setCurrentText(dialog.selected_font)
 
 
 class ColorSettingCard(SettingCard):

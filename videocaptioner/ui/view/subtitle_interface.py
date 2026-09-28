@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, QTime, pyqtSignal
+from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDropEvent, QKeyEvent
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -14,6 +15,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -29,6 +31,7 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     TableView,
+    TableItemDelegate,
     TextEdit,
     TransparentDropDownPushButton,
 )
@@ -58,7 +61,38 @@ from videocaptioner.ui.task_factory import TaskFactory
 from videocaptioner.ui.thread.subtitle_thread import RetranslateThread, SubtitleThread
 
 
+def format_time(milliseconds: int) -> str:
+    hours, remainder = divmod(milliseconds, 3600000)
+    minutes, remainder = divmod(remainder, 60000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+
+def parse_time(value: str) -> int:
+    match = re.fullmatch(r"(\d{2,}):([0-5]\d):([0-5]\d)\.(\d{1,3})", value.strip())
+    if not match:
+        raise ValueError("请输入有效时间，例如 00:00:10.700")
+    hours, minutes, seconds, milliseconds = match.groups()
+    return int(hours) * 3600000 + int(minutes) * 60000 + int(seconds) * 1000 + int(milliseconds.ljust(3, "0"))
+
+
+class TimeDelegate(TableItemDelegate):
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setPlaceholderText("00:00:00.000")
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.setText(index.data(Qt.EditRole))
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.text(), Qt.EditRole)
+
+
 class SubtitleTableModel(QAbstractTableModel):
+    validation_error = pyqtSignal(str)
+
     def __init__(self, data: Union[str, Dict[str, Any]] = ""):
         super().__init__()
         self._data: Dict[str, Any] = {}
@@ -87,18 +121,8 @@ class SubtitleTableModel(QAbstractTableModel):
             return None
 
         if role == Qt.DisplayRole or role == Qt.EditRole:  # type: ignore
-            if col == 0:
-                return (
-                    QTime(0, 0)
-                    .addMSecs(segment["start_time"])
-                    .toString("hh:mm:ss.zzz")[:-2]
-                )
-            elif col == 1:
-                return (
-                    QTime(0, 0)
-                    .addMSecs(segment["end_time"])
-                    .toString("hh:mm:ss.zzz")[:-2]
-                )
+            if col in (0, 1):
+                return format_time(segment["start_time" if col == 0 else "end_time"])
             elif col == 2:
                 return segment["original_subtitle"]
             elif col == 3:
@@ -120,7 +144,18 @@ class SubtitleTableModel(QAbstractTableModel):
             if not segment:
                 return False
 
-            if col == 2:
+            if col in (0, 1):
+                try:
+                    milliseconds = parse_time(str(value))
+                    start = milliseconds if col == 0 else segment["start_time"]
+                    end = milliseconds if col == 1 else segment["end_time"]
+                    if end <= start:
+                        raise ValueError("结束时间必须晚于开始时间")
+                except ValueError as error:
+                    self.validation_error.emit(str(error))
+                    return False
+                segment["start_time" if col == 0 else "end_time"] = milliseconds
+            elif col == 2:
                 segment["original_subtitle"] = value
             elif col == 3:
                 segment["translated_subtitle"] = value
@@ -164,7 +199,7 @@ class SubtitleTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
             return Qt.NoItemFlags  # type: ignore
-        if index.column() in [2, 3]:
+        if index.column() in [0, 1, 2, 3]:
             return Qt.ItemIsEditable | Qt.ItemIsEnabled | Qt.ItemIsSelectable  # type: ignore
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable  # type: ignore
 
@@ -252,6 +287,10 @@ class SubtitleInterface(QWidget):
         save_button.setMenu(save_menu)
         save_button.setFixedHeight(34)
         self.command_bar.addWidget(save_button)
+
+        self.command_bar.addAction(
+            Action(FIF.ADD, self.tr("新增字幕"), triggered=self.add_subtitle)
+        )
 
         # 添加字幕排布下拉按钮
         self.layout_button = TransparentDropDownPushButton(
@@ -353,6 +392,10 @@ class SubtitleInterface(QWidget):
         self.subtitle_table = TableView(self)
         self.model = SubtitleTableModel("")
         self.subtitle_table.setModel(self.model)
+        self.model.validation_error.connect(self.show_edit_error)
+        self.time_delegate = TimeDelegate(self.subtitle_table)
+        self.subtitle_table.setItemDelegateForColumn(0, self.time_delegate)
+        self.subtitle_table.setItemDelegateForColumn(1, self.time_delegate)
         self.subtitle_table.setBorderVisible(True)
         self.subtitle_table.setBorderRadius(8)
         self.subtitle_table.setWordWrap(True)
@@ -363,8 +406,8 @@ class SubtitleInterface(QWidget):
         self.subtitle_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Fixed
         )
-        self.subtitle_table.setColumnWidth(0, 120)
-        self.subtitle_table.setColumnWidth(1, 120)
+        self.subtitle_table.setColumnWidth(0, 150)
+        self.subtitle_table.setColumnWidth(1, 150)
 
         # 配置垂直表头
         self.subtitle_table.verticalHeader().setVisible(True)  # 显示垂直表头
@@ -713,6 +756,7 @@ class SubtitleInterface(QWidget):
         signalBus.subtitle_layout_changed.connect(signal_update)
         self.model.dataChanged.connect(signal_update)
         self.model.layoutChanged.connect(signal_update)
+        self.model.rowsInserted.connect(signal_update)
 
         # 如果有关联的视频文件,则自动加载
         # Note: SubtitleTask doesn't have file_path attribute
@@ -733,6 +777,35 @@ class SubtitleInterface(QWidget):
         )
         signalBus.play_video_segment(start_time, end_time)
 
+    def show_edit_error(self, message: str) -> None:
+        InfoBar.error(self.tr("修改失败"), message,
+                      duration=INFOBAR_DURATION_ERROR, parent=self)
+
+    def add_subtitle(self) -> None:
+        if self._is_processing():
+            self.show_edit_error(self.tr("请等待字幕处理完成后再新增字幕"))
+            return
+        current = self.subtitle_table.currentIndex()
+        position = current.row() + 1 if current.isValid() else self.model.rowCount()
+        items = list(self.model._data.values())
+        start = items[position - 1]["end_time"] if position else 0
+        end = start + 2000
+        if position < len(items) and items[position]["start_time"] > start:
+            end = min(end, items[position]["start_time"])
+        dialog = AddSubtitleDialog(start, end, self.window())
+        if not dialog.exec_():
+            return
+        if self._is_processing():
+            return
+        self.model.beginInsertRows(QModelIndex(), position, position)
+        items.insert(position, dialog.segment)
+        self.model._data = {str(i + 1): item for i, item in enumerate(items)}
+        self.model.endInsertRows()
+        self.subtitle_table.selectRow(position)
+        self.subtitle_table.setCurrentIndex(self.model.index(position, 2))
+        self.subtitle_table.scrollTo(self.model.index(position, 2))
+        self.status_label.setText(self.tr("已新增字幕，请保存"))
+
     def show_context_menu(self, pos) -> None:
         """显示右键菜单"""
         menu = RoundMenu(parent=self)
@@ -748,6 +821,10 @@ class SubtitleInterface(QWidget):
             return
 
         # 添加菜单项
+        add_action = Action(FIF.ADD, self.tr("在下一行新增字幕"))
+        add_action.setEnabled(not self._is_processing())
+        add_action.triggered.connect(self.add_subtitle)
+        menu.addAction(add_action)
         merge_action = Action(FIF.LINK, self.tr("合并"))
         delete_action = Action(FIF.DELETE, self.tr("删除"))
         retranslate_action = Action(FIF.SYNC, self.tr("重新翻译"))
@@ -978,6 +1055,48 @@ class SubtitleInterface(QWidget):
         layout_enum = SubtitleLayoutEnum(layout)  # Convert string to enum
         cfg.set(cfg.subtitle_layout, layout_enum)
         self.layout_button.setText(layout)
+
+
+class AddSubtitleDialog(MessageBoxBase):
+    def __init__(self, start: int, end: int, parent=None):
+        super().__init__(parent)
+        self.segment = {}
+        self.viewLayout.addWidget(BodyLabel(self.tr("新增字幕"), self))
+        self.start_edit = QLineEdit(format_time(start), self)
+        self.end_edit = QLineEdit(format_time(end), self)
+        self.original_edit = TextEdit(self)
+        self.translated_edit = TextEdit(self)
+        for label, editor in (("开始时间（时:分:秒.毫秒）", self.start_edit),
+                              ("结束时间（时:分:秒.毫秒）", self.end_edit),
+                              ("字幕内容", self.original_edit),
+                              ("翻译字幕（可留空）", self.translated_edit)):
+            self.viewLayout.addWidget(BodyLabel(self.tr(label), self))
+            self.viewLayout.addWidget(editor)
+        self.original_edit.setFixedHeight(80)
+        self.translated_edit.setFixedHeight(80)
+        self.error_label = BodyLabel("", self)
+        self.error_label.setWordWrap(True)
+        self.viewLayout.addWidget(self.error_label)
+        self.widget.setMinimumWidth(420)
+        self.yesButton.setText(self.tr("加入字幕"))
+        self.cancelButton.setText(self.tr("取消"))
+
+    def validate(self) -> bool:
+        try:
+            start = parse_time(self.start_edit.text())
+            end = parse_time(self.end_edit.text())
+            if end <= start:
+                raise ValueError("结束时间必须晚于开始时间")
+            original = self.original_edit.toPlainText().strip()
+            translated = self.translated_edit.toPlainText().strip()
+            if not original:
+                raise ValueError("请填写字幕内容，翻译字幕可留空")
+        except ValueError as error:
+            self.error_label.setText(str(error))
+            return False
+        self.segment = dict(start_time=start, end_time=end,
+                            original_subtitle=original, translated_subtitle=translated)
+        return True
 
 
 class PromptDialog(MessageBoxBase):

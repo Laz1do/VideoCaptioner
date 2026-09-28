@@ -32,6 +32,7 @@ from videocaptioner.ui.common.signal_bus import signalBus
 from videocaptioner.ui.components.MySettingCard import (
     ColorSettingCard,
     ComboBoxSettingCard,
+    SearchableFontSettingCard,
     DoubleSpinBoxSettingCard,
     SpinBoxSettingCard,
 )
@@ -256,7 +257,7 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 主字幕样式
-        self.assPrimaryFontCard = ComboBoxSettingCard(
+        self.assPrimaryFontCard = SearchableFontSettingCard(
             FIF.FONT,  # type: ignore
             self.tr("主字幕字体"),
             self.tr("设置主字幕的字体"),
@@ -303,7 +304,7 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # ASS 模式 - 副字幕样式
-        self.assSecondaryFontCard = ComboBoxSettingCard(
+        self.assSecondaryFontCard = SearchableFontSettingCard(
             FIF.FONT,  # type: ignore
             self.tr("副字幕字体"),
             self.tr("设置副字幕的字体"),
@@ -350,7 +351,7 @@ class SubtitleStyleInterface(QWidget):
         )
 
         # 圆角背景样式设置
-        self.roundedFontCard = ComboBoxSettingCard(
+        self.roundedFontCard = SearchableFontSettingCard(
             FIF.FONT,  # type: ignore
             self.tr("字体"),
             self.tr("设置字幕字体"),
@@ -555,17 +556,26 @@ class SubtitleStyleInterface(QWidget):
                 # PIL 无法加载，跳过此字体
                 pass
 
-        # 合并字体列表：内置字体在最前面
-        all_fonts = builtin_font_names + sorted(system_fonts)
+        # Keep the dropdown short; the search dialog exposes every installed family.
+        all_fonts = list(dict.fromkeys(builtin_font_names + sorted(
+            name for name in fontFamilies if not name.startswith(".")
+        )))
+        preferred_fonts = [
+            "Microsoft YaHei", "SimHei", "Arial", "Calibri",
+            "Times New Roman", "Segoe UI", "Noto Sans CJK SC",
+        ]
+        common_fonts = list(dict.fromkeys(builtin_font_names + [
+            name for name in preferred_fonts if name in all_fonts
+        ] + sorted(system_fonts)))
 
         # ASS 模式字体
-        self.assPrimaryFontCard.addItems(all_fonts)
-        self.assSecondaryFontCard.addItems(all_fonts)
+        self.assPrimaryFontCard.setAvailableFonts(all_fonts, common_fonts)
+        self.assSecondaryFontCard.setAvailableFonts(all_fonts, common_fonts)
         self.assPrimaryFontCard.comboBox.setMaxVisibleItems(12)
         self.assSecondaryFontCard.comboBox.setMaxVisibleItems(12)
 
         # 圆角背景模式字体
-        self.roundedFontCard.addItems(all_fonts)
+        self.roundedFontCard.setAvailableFonts(all_fonts, common_fonts)
         self.roundedFontCard.comboBox.setMaxVisibleItems(12)
 
         # 设置圆角背景模式的初始值

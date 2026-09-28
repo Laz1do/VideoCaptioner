@@ -1,6 +1,7 @@
 """Font discovery and loading utilities"""
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Dict, Optional, Union
 
@@ -13,6 +14,45 @@ from videocaptioner.core.utils.logger import setup_logger
 FontType = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
 
 logger = setup_logger("subtitle.font")
+
+
+@lru_cache(maxsize=128)
+def _system_font_path(font_name: str) -> Optional[Path]:
+    """Resolve a Windows font family to its installed file for Pillow preview."""
+    if os.name != "nt":
+        return None
+
+    import winreg
+
+    candidates = []
+    registry_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+    for hive, directory in (
+        (winreg.HKEY_CURRENT_USER, Path.home() / "AppData/Local/Microsoft/Windows/Fonts"),
+        (winreg.HKEY_LOCAL_MACHINE, Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"),
+    ):
+        try:
+            with winreg.OpenKey(hive, registry_path) as key:
+                count = winreg.QueryInfoKey(key)[1]
+                for index in range(count):
+                    description, filename, _ = winreg.EnumValue(key, index)
+                    if not isinstance(filename, str):
+                        continue
+                    family = description.split(" (", 1)[0]
+                    aliases = [part.strip().casefold() for part in family.split(" & ")]
+                    wanted = font_name.casefold()
+                    exact = wanted in aliases
+                    related = any(wanted.startswith(alias + " ") for alias in aliases)
+                    if not exact and not related:
+                        continue
+                    path = Path(os.path.expandvars(filename))
+                    if not path.is_absolute():
+                        path = directory / path
+                    if path.is_file():
+                        candidates.append((not exact, path))
+        except OSError:
+            continue
+
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _get_font_family_name(font_path: Path, font_index: int = 0) -> Optional[str]:
@@ -90,9 +130,15 @@ def get_font(size: int, font_name: str = "") -> FontType:
             logger.debug(f"Loaded system font: '{font_name}'")
             return font
         except (OSError, IOError):
+            system_path = _system_font_path(font_name)
+            if system_path:
+                try:
+                    return ImageFont.truetype(str(system_path), size)
+                except (OSError, IOError):
+                    logger.warning(f"Cannot load installed font file '{system_path}'")
             logger.warning(f"Cannot load font '{font_name}', using fallback")
 
-    fallback_fonts = [f["name"] for f in get_builtin_fonts()]
+    fallback_fonts = [f["path"] for f in get_builtin_fonts()]
     fallback_fonts.extend(
         [
             "PingFang SC",
